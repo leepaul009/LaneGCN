@@ -119,7 +119,7 @@ class ArgoDataset(Dataset):
 
         trajs = np.concatenate((
             df.X.to_numpy().reshape(-1, 1),
-            df.Y.to_numpy().reshape(-1, 1)), 1)
+            df.Y.to_numpy().reshape(-1, 1)), 1) # trajs [num_rows, 2]
         
         steps = [mapping[x] for x in df['TIMESTAMP'].values]
         steps = np.asarray(steps, np.int64) # map from orig index to sorted index
@@ -208,7 +208,7 @@ class ArgoDataset(Dataset):
 
         data['feats'] = feats # [N_agents, 20, 3]
         data['ctrs'] = ctrs # [N_agents, 1, 2]
-        data['orig'] = orig
+        data['orig'] = orig # ego's position at step 19
         data['theta'] = theta
         data['rot'] = rot
         data['gt_preds'] = gt_preds # [N_agents,30,2]

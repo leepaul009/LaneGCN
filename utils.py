@@ -48,8 +48,9 @@ class Logger(object):
         pass
 
 
-def load_pretrain(net, pretrain_dict):
+def load_pretrain(net, pretrain_dict, distributed=False):
     state_dict = net.state_dict()
+    # state_dict = get_module(net, distributed).state_dict()
     for key in pretrain_dict.keys():
         if key in state_dict and (pretrain_dict[key].size() == state_dict[key].size()):
             value = pretrain_dict[key]
@@ -57,6 +58,7 @@ def load_pretrain(net, pretrain_dict):
                 value = value.data
             state_dict[key] = value
     net.load_state_dict(state_dict)
+    # get_module(net, distributed).load_state_dict(state_dict)
 
 
 def gpu(data):

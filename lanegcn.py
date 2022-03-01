@@ -145,9 +145,7 @@ class Net(nn.Module):
         rot, orig = gpu(data["rot"]), gpu(data["orig"])
         # transform prediction to world coordinates
         for i in range(len(out["reg"])):
-            out["reg"][i] = torch.matmul(out["reg"][i], rot[i]) + orig[i].view(
-                1, 1, 1, -1
-            )
+            out["reg"][i] = torch.matmul(out["reg"][i], rot[i]) + orig[i].view(1, 1, 1, -1)
         return out
 
 
@@ -606,7 +604,7 @@ class PredNet(nn.Module):
         )
 
     def forward(self, actors: Tensor, # [N_a, 128, 1]
-                actor_idcs: List[Tensor], # list[ids in global]
+                actor_idcs: List[Tensor], # list[N_batch, N_agents]
                 actor_ctrs: List[Tensor]) -> Dict[str, List[Tensor]]:
         preds = []
         for i in range(len(self.pred)): # 6
@@ -627,7 +625,7 @@ class PredNet(nn.Module):
         row_idcs = torch.arange(len(sort_idcs)).long().to(sort_idcs.device) # [N]
         row_idcs = row_idcs.view(-1, 1).repeat(1, sort_idcs.size(1)).view(-1) # [N,1]=>[N,6]=>[N*6]
         sort_idcs = sort_idcs.view(-1)
-        reg = reg[row_idcs, sort_idcs].view(cls.size(0), cls.size(1), -1, 2) # [N*6,30,2]=?[N,6,30,2]
+        reg = reg[row_idcs, sort_idcs].view(cls.size(0), cls.size(1), -1, 2) # [N*6,30,2]=>[N,6,30,2]
 
         out = dict()
         out["cls"], out["reg"] = [], []
@@ -759,12 +757,14 @@ class PredLoss(nn.Module):
         self.config = config
         self.reg_loss = nn.SmoothL1Loss(reduction="sum")
 
+    # cls: Nb*[N',6]
+    # reg: Nb*[N',6,30,2]
     def forward(self, out: Dict[str, List[Tensor]], gt_preds: List[Tensor], has_preds: List[Tensor]) -> Dict[str, Union[Tensor, int]]:
         cls, reg = out["cls"], out["reg"]
         cls = torch.cat([x for x in cls], 0)
         reg = torch.cat([x for x in reg], 0)
-        gt_preds = torch.cat([x for x in gt_preds], 0)
-        has_preds = torch.cat([x for x in has_preds], 0)
+        gt_preds = torch.cat([x for x in gt_preds], 0) #[N,30,2]
+        has_preds = torch.cat([x for x in has_preds], 0) # [N,30]
 
         loss_out = dict()
         zero = 0.0 * (cls.sum() + reg.sum())
@@ -773,7 +773,7 @@ class PredLoss(nn.Module):
         loss_out["reg_loss"] = zero.clone()
         loss_out["num_reg"] = 0
 
-        num_mods, num_preds = self.config["num_mods"], self.config["num_preds"]
+        num_mods, num_preds = self.config["num_mods"], self.config["num_preds"] # 6,30
         # assert(has_preds.all())
 
         last = has_preds.float() + 0.1 * torch.arange(num_preds).float().to(
@@ -803,7 +803,7 @@ class PredLoss(nn.Module):
         min_dist, min_idcs = dist.min(1)
         row_idcs = torch.arange(len(min_idcs)).long().to(min_idcs.device)
 
-        mgn = cls[row_idcs, min_idcs].unsqueeze(1) - cls
+        mgn = cls[row_idcs, min_idcs].unsqueeze(1) - cls # [N,6]
         mask0 = (min_dist < self.config["cls_th"]).view(-1, 1)
         mask1 = dist - min_dist.view(-1, 1) > self.config["cls_ignore"]
         mgn = mgn[mask0 * mask1]
@@ -907,9 +907,9 @@ def pred_metrics(preds, gt_preds, has_preds):
     ade1 = err[:, 0].mean()
     fde1 = err[:, 0, -1].mean()
 
-    min_idcs = err[:, :, -1].argmin(1)
+    min_idcs = err[:, :, -1].argmin(1) # idx of mode [N,]
     row_idcs = np.arange(len(min_idcs)).astype(np.int64)
-    err = err[row_idcs, min_idcs]
+    err = err[row_idcs, min_idcs] # [N,1]
     ade = err.mean()
     fde = err[:, -1].mean()
     return ade1, fde1, ade, fde, min_idcs
