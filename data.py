@@ -21,6 +21,7 @@ class ArgoDataset(Dataset):
         if 'preprocess' in config and config['preprocess']:
             if train:
                 self.split = np.load(self.config['preprocess_train'], allow_pickle=True)
+                self.split = self.split[:2500]
             else:
                 self.split = np.load(self.config['preprocess_val'], allow_pickle=True)
         else:
@@ -124,6 +125,8 @@ class ArgoDataset(Dataset):
         steps = [mapping[x] for x in df['TIMESTAMP'].values]
         steps = np.asarray(steps, np.int64) # map from orig index to sorted index
 
+        # 'TRACK_ID'和'OBJECT_TYPE'一起作为key来分组（两者都相同，则为同一组）
+        # objs type: PrettyDict(similar to Dict)
         objs = df.groupby(['TRACK_ID', 'OBJECT_TYPE']).groups
         keys = list(objs.keys())
         obj_type = [x[1] for x in keys]
@@ -131,7 +134,7 @@ class ArgoDataset(Dataset):
         agt_idx = obj_type.index('AGENT')
         idcs = objs[keys[agt_idx]]
        
-        agt_traj = trajs[idcs]
+        agt_traj = trajs[idcs] # shape: ex. [50, 2]
         agt_step = steps[idcs]
 
         del keys[agt_idx]
@@ -187,6 +190,7 @@ class ArgoDataset(Dataset):
             traj = traj[i:]
 
             feat = np.zeros((20, 3), np.float32)
+            # R(world->ego) * Vec(world) = Vec(ego)
             feat[step, :2] = np.matmul(rot, (traj - orig.reshape(-1, 2)).T).T
             feat[step, 2] = 1.0
 
@@ -206,12 +210,12 @@ class ArgoDataset(Dataset):
         gt_preds = np.asarray(gt_preds, np.float32)
         has_preds = np.asarray(has_preds, np.bool)
 
-        data['feats'] = feats # [N_agents, 20, 3]
-        data['ctrs'] = ctrs # [N_agents, 1, 2]
-        data['orig'] = orig # ego's position at step 19
-        data['theta'] = theta
-        data['rot'] = rot
-        data['gt_preds'] = gt_preds # [N_agents,30,2]
+        data['feats'] = feats # [N_agents(first is ego), seq=20, feat=3(x,y,validance)] but the number of valid seq is 19
+        data['ctrs'] = ctrs   # [N_agents, 1, 2] orig point ?=(0,0)
+        data['orig'] = orig   # ego's or other agent's position at step 19
+        data['theta'] = theta # angle between world and ego coordinate
+        data['rot'] = rot     # Rotation(world->ego)
+        data['gt_preds'] = gt_preds   # [N_agents,30,2] in world coordinate
         data['has_preds'] = has_preds # [N_agents,30,]
         return data
 
@@ -222,33 +226,25 @@ class ArgoDataset(Dataset):
         radius = max(abs(x_min), abs(x_max)) + max(abs(y_min), abs(y_max))
         lane_ids = self.am.get_lane_ids_in_xy_bbox(data['orig'][0], data['orig'][1], data['city'], radius)
         lane_ids = copy.deepcopy(lane_ids)
-        #print("1111")
+        #print("to process each land id.")
         lanes = dict()
         for lane_id in lane_ids:
             lane = self.am.city_lane_centerlines_dict[data['city']][lane_id]
-            #print("xxx1") 
-            #print("lane_id:{}".format(lane_id))
             lane = copy.deepcopy(lane)
-            #print("xxx2") 
+            # translate center line points from world_coord to ego_coord
             centerline = np.matmul(data['rot'], (lane.centerline - data['orig'].reshape(-1, 2)).T).T
-            #print("xxx3") 
             x, y = centerline[:, 0], centerline[:, 1]
-            #print("xxx4") 
             if x.max() < x_min or x.min() > x_max or y.max() < y_min or y.min() > y_max:
                 continue
             else:
                 """Getting polygons requires original centerline"""
-                #print("aaa1") 
+                # get polygon of this lane, shape [N,]
                 polygon = self.am.get_lane_segment_polygon(lane_id, data['city'])
-                #print("aaa") 
                 polygon = copy.deepcopy(polygon)
-                #print("bbb") 
                 lane.centerline = centerline
-                #print("ccc") 
                 lane.polygon = np.matmul(data['rot'], (polygon[:, :2] - data['orig'].reshape(-1, 2)).T).T
-                #print("ddd") 
                 lanes[lane_id] = lane
-                #print("eee") 
+
         #print("2222")    
         lane_ids = list(lanes.keys())
         ctrs, feats, turn, control, intersect = [], [], [], [], []
@@ -258,6 +254,7 @@ class ArgoDataset(Dataset):
             ctrln = lane.centerline
             num_segs = len(ctrln) - 1
             
+            # lane.centerline上点的数量 决定ctrs的size
             ctrs.append(np.asarray((ctrln[:-1] + ctrln[1:]) / 2.0, np.float32)) # segment center point
             feats.append(np.asarray(ctrln[1:] - ctrln[:-1], np.float32)) # segment length
             
@@ -278,7 +275,7 @@ class ArgoDataset(Dataset):
         for i, ctr in enumerate(ctrs):
             node_idcs.append(range(count, count + len(ctr)))
             count += len(ctr)
-        num_nodes = count # all segs
+        num_nodes = count # all segs (this seg is 'seg within lane' rather than lane_segment)
         
         pre, suc = dict(), dict()
         for key in ['u', 'v']:
@@ -287,16 +284,16 @@ class ArgoDataset(Dataset):
             lane = lanes[lane_id]
             idcs = node_idcs[i]
             
-            pre['u'] += idcs[1:]
+            pre['u'] += idcs[1:] # v -> u
             pre['v'] += idcs[:-1]
-            if lane.predecessors is not None:
+            if lane.predecessors is not None: #两个lane边界的处理，前者最后一个node和后者第一个node
                 for nbr_id in lane.predecessors:
                     if nbr_id in lane_ids:
                         j = lane_ids.index(nbr_id)
                         pre['u'].append(idcs[0])
                         pre['v'].append(node_idcs[j][-1])
                     
-            suc['u'] += idcs[:-1]
+            suc['u'] += idcs[:-1] #  u -> v
             suc['v'] += idcs[1:]
             if lane.successors is not None:
                 for nbr_id in lane.successors:
@@ -345,16 +342,18 @@ class ArgoDataset(Dataset):
         right_pairs = np.asarray(right_pairs, np.int64)
                     
         graph = dict()
-        graph['ctrs'] = np.concatenate(ctrs, 0)
+        # feature or relation for node
+        graph['ctrs'] = np.concatenate(ctrs, 0) # center point coordinate of each node
         graph['num_nodes'] = num_nodes # num of segments 
         graph['feats'] = np.concatenate(feats, 0)
         graph['turn'] = np.concatenate(turn, 0)
         graph['control'] = np.concatenate(control, 0)
         graph['intersect'] = np.concatenate(intersect, 0)
-        graph['pre'] = [pre]
+        graph['pre'] = [pre] # relation between lane's seg(or node)
         graph['suc'] = [suc]
-        graph['lane_idcs'] = lane_idcs
-        graph['pre_pairs'] = pre_pairs
+        graph['lane_idcs'] = lane_idcs # lane index(not lane_id) of node
+        # relation between 2 lanes
+        graph['pre_pairs'] = pre_pairs 
         graph['suc_pairs'] = suc_pairs
         graph['left_pairs'] = left_pairs
         graph['right_pairs'] = right_pairs
@@ -368,7 +367,7 @@ class ArgoDataset(Dataset):
                 #TODO: delete here
                 graph[key] += dilated_nbrs2(graph[key][0], graph['num_nodes'], self.config['scales'])
             else:
-                graph[key] += dilated_nbrs(graph[key][0], graph['num_nodes'], self.config['num_scales'])
+                graph[key] += dilated_nbrs(graph[key][0], graph['num_nodes'], self.config['num_scales']) # num_scales=6
         return graph
 
 
@@ -529,9 +528,8 @@ def ref_copy(data):
 # num_scales: 6
 def dilated_nbrs(nbr, num_nodes, num_scales):
     data = np.ones(len(nbr['u']), np.bool)
-    # create mat[Ns,Ns] where nbr['u'] are row id and and nbr['v'] are col id
-    # and len(data)==len(nbr['u'])==len(nbr['v']), give value of data[k](1) to mat[nbr['u'][k],nbr['v'][k]]
-    # which indicates the realtion from row item(segment) to col item(segment)
+    # 生成mat, size=[num_nodes, num_nodes], nbr['u']和nbr['v']分别存着row id和col id.
+    # 有len(data)==len(nbr['u'])==len(nbr['v']), 将data[k]的值(True)赋给mat[nbr['u'][k], nbr['v'][k]].
     csr = sparse.csr_matrix((data, (nbr['u'], nbr['v'])), shape=(num_nodes, num_nodes))
 
     mat = csr
